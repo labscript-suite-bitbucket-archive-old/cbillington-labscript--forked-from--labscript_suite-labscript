@@ -23,7 +23,7 @@ import os
 import sys
 import subprocess
 import keyword
-from inspect import getargspec
+from inspect import getcallargs
 from functools import wraps
 
 # Notes for v3
@@ -141,12 +141,16 @@ def fastflatten(inarray, dtype):
 
 def set_passed_properties(property_names = {}):
     """
-    This decorator is intended to wrap the __init__ functions and to
-    write any selected kwargs into the properties.  
+    Decorator for device __init__ methods that saves the listed arguments/keyword
+    arguments as properties. Argument values as passed to __init__ will be saved, with
+    the exception that if an instance attribute exists after __init__ has run that has
+    the same name as an argument, the instance attribute will be saved instead of the
+    argument value. This allows code within __init__ to process default arguments
+    before they are saved.
     
-    names is a dictionary {key:val}, where each val
+    property_names is a dictionary {key:val}, where each val
         is a list [var1, var2, ...] of variables to be pulled from
-        properties_dict and added to the property with name key (it's location)
+        properties_dict and added to the property with name key (its location)
         
     internally they are all accessed by calling self.get_property()
     """
@@ -156,21 +160,24 @@ def set_passed_properties(property_names = {}):
 
             return_value = func(inst, *args, **kwargs)
 
-            # Introspect arguments and named arguments functions.  in python 3 this is
-            # a pair of func.__something__ calls and no import from argspec is needed
-            a = getargspec(func)
-            
-            if a.defaults is not None:
-                args_dict = {key:val for key,val in zip(a.args[-len(a.defaults):],a.defaults)}
-            else:
-                args_dict = {}
-                
-            # Update this list with the values from the passed keywords
-            args_dict.update(kwargs)
+            # Get a dict of the call arguments/keyword arguments by name:
+            call_values = getcallargs(func, inst, *args, **kwargs)
 
-            # print args_dict
-            # print property_names
-            inst.set_properties(args_dict, property_names)
+            all_property_names = set()
+            for names in property_names.values():
+                all_property_names.update(names)
+
+            property_values = {}
+            for name in all_property_names:
+                # If there is an instance attribute with that name, use that, otherwise
+                # use the call value:
+                if hasattr(inst, name):
+                    property_values[name] = getattr(inst, name)
+                else:
+                    property_values[name] = call_values[name]
+
+            # Save them:
+            inst.set_properties(property_values, property_names)
 
             return return_value
 
@@ -397,7 +404,7 @@ class Device(object):
             return self 
         parent = self.parent_device
         try:
-            while not isinstance(parent,PseudoclockDevice):
+            while parent is not None and not isinstance(parent,PseudoclockDevice):
                 parent = parent.parent_device
             return parent
         except Exception as e:
@@ -438,7 +445,7 @@ class Device(object):
         """The earliest time output can be commanded from this device at the start of the experiment.
         This is nonzeo on secondary pseudoclock devices due to triggering delays."""
         parent = self.pseudoclock_device
-        if parent.is_master_pseudoclock:
+        if parent is None or parent.is_master_pseudoclock:
             return 0
         else:
             return round(parent.trigger_times[0] + parent.trigger_delay, 10)
@@ -505,7 +512,7 @@ class IntermediateDevice(Device):
         # this should be checked here because it should only be connected a clockline
         # The allowed_children attribute of parent classes doesn't prevent this from being connected to something that accepts 
         # an instance of 'Device' as a child
-        if not isinstance(parent_device, ClockLine):
+        if parent_device is not None and not isinstance(parent_device, ClockLine):
             if not hasattr(parent_device, 'name'):
                 parent_device_name = 'Unknown: not an instance of a labscript device class'
             else:
@@ -528,7 +535,7 @@ class ClockLine(Device):
         
     def add_device(self, device):
         Device.add_device(self, device)
-        if hasattr(device, 'clock_limit') and (self._clock_limit is None or device.clock_limit < self.clock_limit):
+        if getattr(device, 'clock_limit', None) is not None and (self._clock_limit is None or device.clock_limit < self.clock_limit):
             self._clock_limit = device.clock_limit
     
     # define a property to make sure no children overwrite this value themselves
